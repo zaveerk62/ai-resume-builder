@@ -167,7 +167,6 @@ const TEMPLATES: TemplateInfo[] = [
 ];
 
 const FONT_STACK = "'Inter', 'Calibri', 'Helvetica Neue', 'Arial', system-ui, -apple-system, sans-serif";
-const UI_DISPLAY = "'Playfair Display', 'Times New Roman', Georgia, serif";
 const UI_BODY = "'Source Serif 4', 'Source Serif Pro', Georgia, 'Times New Roman', serif";
 const UI_MONO = "'IBM Plex Mono', ui-monospace, 'SF Mono', monospace";
 
