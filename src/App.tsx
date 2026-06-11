@@ -3,7 +3,7 @@ import type { ReactNode, ChangeEvent } from 'react';
 import {
   Download, Plus, Trash2, ChevronUp, ChevronDown, Sparkles,
   RotateCcw, Upload, X, Loader2, LayoutTemplate, Eye, Edit3,
-  Settings as SettingsIcon, Key, Check, AlertCircle,
+  Check, AlertCircle,
 } from 'lucide-react';
 import mammoth from 'mammoth';
 import * as pdfjsLib from 'pdfjs-dist';
@@ -174,70 +174,28 @@ const UI_MONO = "'IBM Plex Mono', ui-monospace, 'SF Mono', monospace";
 // API SETTINGS — Grok-default OpenAI-compatible
 // =====================================================================
 
-interface ApiSettings {
-  baseUrl: string;
-  apiKey: string;
-  model: string;
-}
-
-const ENV = (import.meta.env || {}) as Record<string, string | undefined>;
-const DEFAULT_API: ApiSettings = {
-  baseUrl: ENV.VITE_API_BASE_URL || 'https://api.groq.com/openai/v1',
-  apiKey: ENV.VITE_API_KEY || '',
-  model: ENV.VITE_API_MODEL || 'llama-3.3-70b-versatile',
-};
-
-const API_KEY = 'resume-api-settings-v1';
-
-function loadApiSettings(): ApiSettings {
-  try {
-    const raw = localStorage.getItem(API_KEY);
-    if (!raw) return DEFAULT_API;
-    const stored = JSON.parse(raw) as Partial<ApiSettings>;
-    return {
-      baseUrl: stored.baseUrl || DEFAULT_API.baseUrl,
-      apiKey: stored.apiKey || DEFAULT_API.apiKey,
-      model: stored.model || DEFAULT_API.model,
-    };
-  } catch {
-    return DEFAULT_API;
-  }
-}
-
-function saveApiSettings(s: ApiSettings) {
-  try { localStorage.setItem(API_KEY, JSON.stringify(s)); } catch { /* noop */ }
-}
-
 interface ChatMessage { role: 'system' | 'user' | 'assistant'; content: string }
 
-async function callChat(api: ApiSettings, messages: ChatMessage[], opts?: { responseJson?: boolean }): Promise<string> {
-  // In production the request goes through /api/chat (serverless proxy) so the key
-  // stays server-side and never appears in the client bundle.
-  const isProd = import.meta.env.PROD;
+async function callChat(messages: ChatMessage[], opts?: { responseJson?: boolean }): Promise<string> {
+  const env = import.meta.env as Record<string, string | undefined>;
   let url: string;
   const fetchHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
 
-  if (isProd) {
+  if (import.meta.env.PROD) {
     url = '/api/chat';
   } else {
-    if (!api.apiKey) throw new Error('No API key set. Open Settings to add one.');
-    url = `${api.baseUrl.replace(/\/+$/, '')}/chat/completions`;
-    fetchHeaders.Authorization = `Bearer ${api.apiKey}`;
+    const apiKey = env.VITE_API_KEY || '';
+    if (!apiKey) throw new Error('Set VITE_API_KEY in .env to use AI features locally.');
+    const baseUrl = (env.VITE_API_BASE_URL || 'https://api.groq.com/openai/v1').replace(/\/+$/, '');
+    url = `${baseUrl}/chat/completions`;
+    fetchHeaders.Authorization = `Bearer ${apiKey}`;
   }
 
-  const body: Record<string, unknown> = {
-    model: api.model,
-    messages,
-    temperature: 0.4,
-  };
-  if (opts?.responseJson) {
-    body.response_format = { type: 'json_object' };
-  }
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: fetchHeaders,
-    body: JSON.stringify(body),
-  });
+  const model = env.VITE_API_MODEL || 'llama-3.3-70b-versatile';
+  const body: Record<string, unknown> = { model, messages, temperature: 0.4 };
+  if (opts?.responseJson) body.response_format = { type: 'json_object' };
+
+  const res = await fetch(url, { method: 'POST', headers: fetchHeaders, body: JSON.stringify(body) });
   if (!res.ok) {
     const txt = await res.text().catch(() => '');
     throw new Error(`${res.status} ${res.statusText}${txt ? ' — ' + txt.slice(0, 200) : ''}`);
@@ -328,8 +286,8 @@ Rules:
 - "photo" must always be the empty string.
 - Output ONLY the JSON object. No markdown, no preamble, no commentary.`;
 
-async function extractResumeFromText(text: string, api: ApiSettings): Promise<Partial<ResumeData>> {
-  const raw = await callChat(api, [
+async function extractResumeFromText(text: string): Promise<Partial<ResumeData>> {
+  const raw = await callChat([
     { role: 'system', content: EXTRACTION_SYSTEM },
     { role: 'user', content: `Convert this resume text:\n\n${text.slice(0, 14000)}` },
   ], { responseJson: true });
@@ -370,8 +328,6 @@ export default function ResumeBuilder() {
   const [saveStatus, setSaveStatus] = useState<string>('');
   const [showResetConfirm, setShowResetConfirm] = useState<boolean>(false);
   const [showTemplates, setShowTemplates] = useState<boolean>(false);
-  const [showSettings, setShowSettings] = useState<boolean>(false);
-  const [apiSettings, setApiSettings] = useState<ApiSettings>(() => loadApiSettings());
   const [importStatus, setImportStatus] = useState<string>('');
   const [toast, setToast] = useState<{ msg: string; kind: 'ok' | 'err' } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -480,15 +436,9 @@ export default function ResumeBuilder() {
       if (!parsed.text.trim()) {
         throw new Error('Could not extract any text from the file.');
       }
-      if (!apiSettings.apiKey) {
-        setImportStatus('');
-        setToast({ msg: 'Add an API key in Settings first to parse non-JSON files.', kind: 'err' });
-        setShowSettings(true);
-        return;
-      }
 
       setImportStatus(`Parsing ${file.name} with AI…`);
-      const extracted = await extractResumeFromText(parsed.text, apiSettings);
+      const extracted = await extractResumeFromText(parsed.text);
       setData(prev => mergeResumeData(prev, extracted));
       setImportStatus('');
       setToast({ msg: `Imported ${file.name} — review fields and edit as needed.`, kind: 'ok' });
@@ -655,11 +605,6 @@ export default function ResumeBuilder() {
 
   const runAI = async () => {
     if (!aiPrompt.trim()) return;
-    if (!apiSettings.apiKey) {
-      setAiError('No API key set. Open Settings to add one.');
-      setShowSettings(true);
-      return;
-    }
     setAiLoading(true);
     setAiError('');
 
@@ -680,7 +625,7 @@ export default function ResumeBuilder() {
     }
 
     try {
-      const raw = await callChat(apiSettings, [
+      const raw = await callChat([
         { role: 'system', content: 'You are a precise resume editor. Follow the requested JSON shape exactly when asked. Never add commentary.' },
         { role: 'user', content: userPrompt },
       ], { responseJson: wantJson });
@@ -745,9 +690,6 @@ export default function ResumeBuilder() {
             <button onClick={() => setShowTemplates(true)} className="bld-btn">
               <LayoutTemplate className="w-3.5 h-3.5" /> Templates
             </button>
-            <button onClick={() => setShowSettings(true)} className="bld-btn">
-              <SettingsIcon className="w-3.5 h-3.5" /> Settings
-            </button>
             <button onClick={() => setShowResetConfirm(true)} className="bld-btn bld-btn-ghost">
               <RotateCcw className="w-3.5 h-3.5" /> Reset
             </button>
@@ -805,13 +747,6 @@ export default function ResumeBuilder() {
         </div>
       )}
 
-      {showSettings && (
-        <SettingsModal
-          settings={apiSettings}
-          onSave={(s) => { setApiSettings(s); saveApiSettings(s); setShowSettings(false); setToast({ msg: 'Settings saved.', kind: 'ok' }); }}
-          onClose={() => setShowSettings(false)}
-        />
-      )}
 
       {showResetConfirm && (
         <div className="bld-modal-backdrop no-print" onClick={() => setShowResetConfirm(false)}>
@@ -849,11 +784,6 @@ export default function ResumeBuilder() {
                   <Sparkles className="w-4 h-4" style={{ color: 'var(--accent)' }} />
                   Editor's Desk
                 </h3>
-                {!apiSettings.apiKey && (
-                  <button onClick={() => setShowSettings(true)} className="bld-btn bld-btn-ghost" style={{ fontSize: 11, padding: '2px 8px' }}>
-                    <Key className="w-3 h-3" /> add key
-                  </button>
-                )}
               </div>
               <div className="bld-card__body">
                 <p style={{ fontFamily: UI_BODY, fontStyle: 'italic', fontSize: 13.5, color: 'var(--ink-2)', margin: '0 0 12px', lineHeight: 1.55 }}>
@@ -1023,113 +953,6 @@ export default function ResumeBuilder() {
 // =====================================================================
 // SUB-COMPONENTS
 // =====================================================================
-
-function SettingsModal({ settings, onSave, onClose }: { settings: ApiSettings; onSave: (s: ApiSettings) => void; onClose: () => void }) {
-  const [draft, setDraft] = useState<ApiSettings>(settings);
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
-
-  const test = async () => {
-    setTesting(true);
-    setTestResult(null);
-    try {
-      const out = await callChat(draft, [{ role: 'user', content: 'Say only the word: ok' }]);
-      setTestResult({ ok: true, msg: `Connected — model replied: "${out.trim().slice(0, 60)}"` });
-    } catch (err) {
-      setTestResult({ ok: false, msg: err instanceof Error ? err.message : 'Connection failed' });
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  return (
-    <div className="bld-modal-backdrop no-print bld-scroll" onClick={onClose}>
-      <div className="bld-modal max-w-lg w-full" onClick={e => e.stopPropagation()}>
-        <div className="bld-modal__header">
-          <div className="bld-modal__eyebrow">§ Provider config</div>
-          <h3 className="bld-modal__title">AI <em>settings</em></h3>
-          <p className="bld-modal__lede">
-            Any OpenAI-compatible endpoint works. Defaults come from <span style={{ fontFamily: UI_MONO, fontStyle: 'normal', fontSize: 12, color: 'var(--ink)' }}>.env</span> — overrides save to localStorage. Either way the key is sent from the browser, so this is fine for local use, <strong style={{ color: 'var(--accent)' }}>not</strong> for public deployment.
-          </p>
-        </div>
-        <div className="bld-modal__body">
-          <div className="bld-field">
-            <label className="bld-label">Base URL</label>
-            <input
-              className="bld-input"
-              value={draft.baseUrl}
-              onChange={e => setDraft({ ...draft, baseUrl: e.target.value })}
-              placeholder="https://api.x.ai/v1"
-            />
-            <div style={{ fontFamily: UI_MONO, fontSize: 10, color: 'var(--ink-3)', marginTop: 4, letterSpacing: '0.04em', lineHeight: 1.6 }}>
-              <div>Groq: <span style={{ color: 'var(--ink)' }}>https://api.groq.com/openai/v1</span></div>
-              <div>Grok (xAI): <span style={{ color: 'var(--ink)' }}>https://api.x.ai/v1</span></div>
-              <div>OpenAI: <span style={{ color: 'var(--ink)' }}>https://api.openai.com/v1</span> &middot; OpenRouter: <span style={{ color: 'var(--ink)' }}>https://openrouter.ai/api/v1</span></div>
-            </div>
-          </div>
-          <div className="bld-field">
-            <label className="bld-label">API Key</label>
-            <input
-              className="bld-input"
-              type="password"
-              autoComplete="off"
-              value={draft.apiKey}
-              onChange={e => setDraft({ ...draft, apiKey: e.target.value })}
-              placeholder="xai-… / sk-… / sk-or-v1-…"
-            />
-          </div>
-          <div className="bld-field">
-            <label className="bld-label">Model</label>
-            <input
-              className="bld-input"
-              value={draft.model}
-              onChange={e => setDraft({ ...draft, model: e.target.value })}
-              placeholder="grok-4-fast-non-reasoning"
-            />
-            <div style={{ fontFamily: UI_MONO, fontSize: 10, color: 'var(--ink-3)', marginTop: 4, letterSpacing: '0.04em', lineHeight: 1.6 }}>
-              <div>Groq: <span style={{ color: 'var(--ink)' }}>llama-3.3-70b-versatile</span>, <span style={{ color: 'var(--ink)' }}>llama-3.1-8b-instant</span></div>
-              <div>Grok (xAI): <span style={{ color: 'var(--ink)' }}>grok-4-fast-non-reasoning</span></div>
-            </div>
-          </div>
-
-          {testResult && (
-            <div style={{
-              padding: '10px 12px',
-              marginTop: 6,
-              border: `1px solid ${testResult.ok ? 'var(--ink)' : 'var(--accent)'}`,
-              background: testResult.ok ? 'var(--paper)' : 'rgba(139,26,26,0.06)',
-              fontFamily: UI_MONO,
-              fontSize: 11.5,
-              color: testResult.ok ? 'var(--ink)' : 'var(--accent)',
-              borderRadius: 2,
-              boxShadow: `2px 2px 0 0 ${testResult.ok ? 'var(--ink)' : 'var(--accent)'}`,
-            }}>
-              {testResult.ok ? <Check className="w-3.5 h-3.5 inline mr-1.5" /> : <AlertCircle className="w-3.5 h-3.5 inline mr-1.5" />}
-              {testResult.msg}
-            </div>
-          )}
-
-          <div className="flex gap-2 mt-4">
-            <button onClick={test} disabled={testing || !draft.apiKey} className="bld-btn" style={{ flex: 1, justifyContent: 'center', opacity: testing || !draft.apiKey ? 0.6 : 1 }}>
-              {testing ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Testing…</> : <><Key className="w-3.5 h-3.5" /> Test connection</>}
-            </button>
-            <button onClick={() => onSave(draft)} className="bld-btn bld-btn-primary" style={{ flex: 1, justifyContent: 'center' }}>
-              <Check className="w-3.5 h-3.5" /> Save
-            </button>
-          </div>
-          <button
-            onClick={() => { try { localStorage.removeItem(API_KEY); } catch { /* noop */ } setDraft(DEFAULT_API); setTestResult(null); }}
-            className="bld-btn bld-btn-ghost"
-            style={{ width: '100%', justifyContent: 'center', marginTop: 8, fontSize: 12 }}
-            title="Clear localStorage overrides and restore .env defaults"
-          >
-            Reset to .env defaults
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 function ViewToggle({ value, onChange }: { value: 'edit' | 'preview'; onChange: (v: 'edit' | 'preview') => void }) {
   const containerRef = useRef<HTMLDivElement>(null);
